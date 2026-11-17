@@ -8,47 +8,69 @@ This project explores parameter-efficient fine-tuning of a small language model 
 
 Rather than relying on a general-purpose LLM to detect threats through prompting alone, the project fine-tunes Qwen3-1.7B on a labeled prompt-injection dataset using 4-bit quantization and Low-Rank Adaptation (LoRA).
 
+Two training notebooks are included:
+- `FineTunedQwenThreatClassifierV1.ipynb` — initial exploratory pass.
+- `FineTunedQwenThreatClassifierV2.ipynb` — improved, production-oriented version with proper validation, Qwen-native chat formatting, expanded LoRA coverage, model merging, and held-out test evaluation. **V2 is the recommended version.**
+
 ## Results at a glance
 
 ### Training
 
-| Metric | Value |
-|---|---:|
-| Base model | Qwen3-1.7B |
-| Fine-tuning method | QLoRA |
-| Quantization | 4-bit NF4 |
-| LoRA rank | 8 |
-| LoRA alpha | 32 |
-| LoRA dropout | 0.05 |
-| Training steps | 500 |
-| Training time | ~25 minutes |
-| Trainable parameters | 917,504 |
-| Trainable parameter percentage | ~0.0533% |
-| Final validation loss | 1.2916 |
-| Final mean token accuracy | 79.28% |
+| Metric | V1 | V2 |
+|---|---:|---:|
+| Base model | Qwen3-1.7B | Qwen3-1.7B |
+| Fine-tuning method | QLoRA | QLoRA |
+| Quantization | 4-bit NF4 | 4-bit NF4 |
+| Double quantization | Enabled | Enabled |
+| LoRA rank | 8 | 8 |
+| LoRA alpha | 32 | 32 |
+| LoRA dropout | 0.05 | 0.05 |
+| LoRA target modules | `q_proj` | `q_proj`, `v_proj` |
+| Mixed precision | BF16 | FP16 |
+| Training steps | 500 | 500 |
+| Training time | ~26 min | ~41 min |
+| Trainable parameters | 917,504 | ~1.8M |
+| Trainable parameter percentage | ~0.0533% | ~0.107% |
+| Final validation loss | 2.3910 | **0.3561** |
+| Final mean token accuracy | 61.7% | **93.4%** |
 
-### Training progress
+### Training progress (V2)
 
-Validation loss decreased consistently throughout the training run, from `1.4768` at step 100 to `1.2916` at step 500.
+| Step | Training Loss | Validation Loss | Mean Token Accuracy |
+|---:|---:|---:|---:|
+| 100 | 0.5729 | 0.4784 | 92.26% |
+| 200 | 0.4979 | 0.3917 | 93.07% |
+| 300 | 0.4625 | 0.3704 | 93.31% |
+| 400 | 0.4033 | 0.3604 | 93.40% |
+| 500 | 0.4319 | 0.3561 | 93.45% |
 
-![Training Results](assets/training-results.png)
+Validation loss decreased consistently throughout the run, indicating stable generalization without overfitting.
 
-### Threat detection evaluation
+### Threat detection evaluation (V2, held-out test set)
 
-The model was evaluated on a separate held-out test dataset.
+The merged model was evaluated on a separate held-out test dataset (940 samples after filtering).
 
 | Metric | Result |
 |---|---:|
-| Accuracy | `ADD VALUE` |
-| Precision | `ADD VALUE` |
-| Recall | `ADD VALUE` |
-| Macro F1 | `ADD VALUE` |
-| False Positive Rate | `ADD VALUE` |
-| False Negative Rate | `ADD VALUE` |
+| Accuracy | **0.96** |
+| Precision (Benign / Malicious) | 0.96 / 0.96 |
+| Recall (Benign / Malicious) | 0.94 / 0.97 |
+| F1 (Benign / Malicious) | 0.95 / 0.96 |
+| Macro F1 | 0.96 |
+| False Positive Rate | ~5.9% (23 / 390) |
+| False Negative Rate | ~3.1% (17 / 552) |
+| Invalid predictions | 2 / 940 |
 
 ![Confusion Matrix](assets/confusion-matrix.png)
 
-*Note: Mean token accuracy is a language-model training metric, not the final threat-classification accuracy. The classification metrics above measure actual detection performance.*
+Confusion matrix (rows = actual, columns = predicted):
+
+| | Pred: Benign | Pred: Malicious |
+|---|---:|---:|
+| **Actual: Benign** | 367 | 23 |
+| **Actual: Malicious** | 17 | 533 |
+
+*Inference: batched (batch size 4), greedy decoding, 40 max new tokens, ~4.8 samples/sec, ~196 seconds total.*
 
 ## Features
 
@@ -56,15 +78,18 @@ The model was evaluated on a separate held-out test dataset.
 - Parameter-efficient training using **QLoRA**.
 - 4-bit NF4 quantization with double quantization.
 - LoRA adapters to update a small fraction of model parameters.
+- **V2:** Qwen-native conversational formatting through `tokenizer.apply_chat_template()` with a detailed system prompt.
+- **V2:** Proper train / validation / test splits (V1 used only train + test).
+- **V2:** LoRA applied to both `q_proj` and `v_proj` attention projections (V1 used `q_proj` only).
+- **V2:** FP16 mixed precision for T4 GPU compatibility.
 - Structured classification output containing:
-  - **Label:** benign or malicious.
+  - **Label:** benign (0) or malicious (1).
   - **Category:** attack category.
   - **Severity:** predicted threat severity.
 - Dataset filtering and preprocessing using Hugging Face Datasets.
-- Qwen-native conversational formatting through `tokenizer.apply_chat_template()`.
 - Validation-based training monitoring.
-- Held-out test evaluation.
-- Classification reports and confusion matrix.
+- Held-out test evaluation with classification report and confusion matrix.
+- **V2:** Model saving — PEFT adapter (`./qwen-threat-classifier-adapter`) and merged standalone FP16 model (`./qwen-threat-classifier-merged`).
 - Prediction-level error analysis.
 
 ## Model and dataset
@@ -88,7 +113,7 @@ Dataset splits:
 | Split | Purpose |
 |---|---|
 | Training | Fine-tuning the model |
-| Validation | Monitoring generalization during training |
+| Validation | Monitoring generalization during training (V2 only) |
 | Test | Final held-out evaluation |
 
 The dataset's labels, categories, and severity annotations are used to construct structured supervised fine-tuning targets.
@@ -99,13 +124,14 @@ The project follows a supervised fine-tuning pipeline.
 
 1. **Dataset loading:** Load the prompt-injection dataset using Hugging Face Datasets.
 2. **Preprocessing:** Filter and prepare the examples containing input text, label, category, and severity.
-3. **Conversational formatting:** Convert each example into a system-user-assistant conversation using Qwen3's native chat template.
+3. **Conversational formatting:** Convert each example into a system-user-assistant conversation using Qwen3's native chat template (V2) or a hand-rolled template (V1).
 4. **Quantization:** Load the base model in 4-bit NF4 precision to reduce memory requirements.
 5. **LoRA configuration:** Attach trainable low-rank adapters to selected model modules while keeping the quantized base weights frozen.
 6. **Fine-tuning:** Train the adapters on the formatted dataset.
 7. **Validation:** Monitor training and validation loss throughout training.
 8. **Evaluation:** Generate predictions on the held-out test set and compare them against ground-truth annotations.
 9. **Error analysis:** Inspect incorrect predictions and evaluate classification performance.
+10. **V2: Model merge:** Merge LoRA adapters into the base model for standalone deployment.
 
 ## QLoRA configuration
 
@@ -118,16 +144,18 @@ The base model is quantized and kept frozen. Instead of updating all model param
 | Quantization type | NF4 |
 | Quantization bits | 4 |
 | Double quantization | Enabled |
-| Compute dtype | FP16 |
+| Compute dtype | FP16 (V2) / BF16 (V1) |
 | LoRA rank (`r`) | 8 |
 | LoRA alpha | 32 |
 | LoRA dropout | 0.05 |
+| LoRA target modules | `q_proj`, `v_proj` (V2) / `q_proj` (V1) |
 | Optimizer | Paged AdamW 8-bit |
 | Learning rate | 2e-4 |
 | Training steps | 500 |
-| Effective batch size | 16 |
+| Effective batch size | 16 (batch size 4 × gradient accumulation 4) |
+| Max sequence length | 512 |
 
-Only approximately **0.0533% of the model's parameters** were trainable during fine-tuning.
+Only approximately **0.0533%** (V1) / **~0.107%** (V2) of the model's parameters were trainable during fine-tuning.
 
 This substantially reduces the number of parameters requiring gradient updates compared with full fine-tuning.
 
@@ -147,6 +175,8 @@ The final evaluation therefore uses generated predictions on the held-out test s
 - **False positive rate:** Proportion of benign examples incorrectly flagged as malicious.
 - **False negative rate:** Proportion of malicious examples incorrectly classified as benign.
 
+For security-oriented classification, false negatives are particularly important because they represent malicious inputs that the detector fails to identify.
+
 ### Structured output evaluation
 
 In addition to the primary benign/malicious classification task, the model is evaluated on:
@@ -165,24 +195,6 @@ Incorrect predictions are retained for further inspection. This helps identify:
 - Incorrect attack-category predictions.
 - Severity misclassification.
 
-For security-oriented classification, false negatives are particularly important because they represent malicious inputs that the detector fails to identify.
-
-## Training results
-
-The training run completed 500 optimization steps in approximately 25 minutes.
-
-| Step | Training Loss | Validation Loss | Mean Token Accuracy |
-|---:|---:|---:|---:|
-| 100 | 1.7623 | 1.4768 | 77.18% |
-| 200 | 1.6595 | 1.3916 | 78.10% |
-| 300 | 1.5948 | 1.3329 | 78.78% |
-| 400 | 1.4775 | 1.3032 | 79.11% |
-| 500 | 1.5436 | 1.2916 | 79.28% |
-
-Validation loss decreased throughout the run, suggesting that the model continued to improve on the validation split.
-
-The final training loss was `1.5436`, while the final validation loss was `1.2916`.
-
 ## Tech stack
 
 - **Python** — Core implementation.
@@ -191,23 +203,24 @@ The final training loss was `1.5436`, while the final validation loss was `1.291
 - **Hugging Face Datasets** — Dataset loading and preprocessing.
 - **PEFT** — Parameter-efficient fine-tuning with LoRA.
 - **bitsandbytes** — 4-bit quantization and memory-efficient optimization.
-- **TRL** — Supervised fine-tuning workflow.
+- **TRL** — Supervised fine-tuning workflow (SFTTrainer, SFTConfig).
 - **scikit-learn** — Classification metrics and confusion matrix.
 - **Matplotlib** — Evaluation visualizations.
+- **torchao** (V2) — Model weight merging utilities.
 
 ## Repository structure
 
 ```text
 .
 ├── FineTunedQwenThreatClassifierV1.ipynb
+├── FineTunedQwenThreatClassifierV2.ipynb
 ├── assets/
 │   ├── training-results.png
 │   └── confusion-matrix.png
 ├── README.md
+├── IMPLEMENTATION_EXPLANATION.md
 └── ...
 ```
-
-*The structure above highlights the primary training notebook and result artifacts. Additional files can be added as the project evolves.*
 
 ## Running the project
 
@@ -215,14 +228,13 @@ The final training loss was `1.5436`, while the final validation loss was `1.291
 
 - Python 3.10+
 - PyTorch with CUDA support
-- A compatible NVIDIA GPU
+- A compatible NVIDIA GPU (T4 used in development)
 - Hugging Face account (for model and dataset access)
 
 ### 1. Clone the repository
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/Qwen3-Prompt-Injection-Detector.git
-
 cd Qwen3-Prompt-Injection-Detector
 ```
 
@@ -232,6 +244,8 @@ cd Qwen3-Prompt-Injection-Detector
 pip install -U transformers datasets accelerate peft
 pip install -U bitsandbytes trl
 pip install -U scikit-learn matplotlib pandas
+# V2 model merging
+pip install -U torchao
 ```
 
 ### 3. Load the dataset
@@ -251,17 +265,18 @@ test = dataset["test"]
 
 ### 4. Run the training notebook
 
-Open `FineTunedQwenThreatClassifierV1.ipynb` and execute the notebook cells in sequence.
+Open `FineTunedQwenThreatClassifierV2.ipynb` (recommended) or `FineTunedQwenThreatClassifierV1.ipynb` and execute the notebook cells in sequence.
 
 The notebook covers:
 
 - Dataset preparation.
-- Qwen3 chat-template formatting.
+- Qwen3 chat-template formatting (V2).
 - 4-bit model loading.
 - LoRA configuration.
 - Supervised fine-tuning.
 - Validation monitoring.
 - Test-set prediction and evaluation.
+- Model adapter saving and merging (V2).
 
 ## Limitations and future improvements
 
